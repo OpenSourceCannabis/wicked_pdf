@@ -4,29 +4,16 @@
 require 'logger'
 require 'digest/md5'
 require 'rbconfig'
+require 'open3'
 
-if (RbConfig::CONFIG['target_os'] =~ /mswin|mingw/) && (RUBY_VERSION < '1.9')
-  require 'win32/open3'
-else
-  require 'open3'
-end
-
-begin
-  require 'active_support/core_ext/module/attribute_accessors'
-rescue LoadError
-  require 'active_support/core_ext/class/attribute_accessors'
-end
-
-begin
-  require 'active_support/core_ext/object/blank'
-rescue LoadError
-  require 'active_support/core_ext/blank'
-end
+require 'active_support/core_ext/module/attribute_accessors'
+require 'active_support/core_ext/object/blank'
 
 require 'wicked_pdf/version'
 require 'wicked_pdf/railtie'
 require 'wicked_pdf/tempfile'
 require 'wicked_pdf/middleware'
+require 'wicked_pdf/progress'
 
 class WickedPdf
   DEFAULT_BINARY_VERSION = Gem::Version.new('0.9.9')
@@ -35,6 +22,8 @@ class WickedPdf
   @@config = {}
   cattr_accessor :config
   attr_accessor :binary_version
+
+  include Progress
 
   def initialize(wkhtmltopdf_binary_path = nil)
     @exe_path = wkhtmltopdf_binary_path || find_wkhtmltopdf_binary_path
@@ -68,15 +57,18 @@ class WickedPdf
     options.merge!(WickedPdf.config) { |_key, option, _config| option }
     generated_pdf_file = WickedPdfTempfile.new('wicked_pdf_generated_file.pdf', options[:temp_path])
     command = [@exe_path]
-    command << '-q' unless on_windows? # suppress errors on stdout
     command += parse_options(options)
     command << url
     command << generated_pdf_file.path.to_s
 
     print_command(command.inspect) if in_development_mode?
 
-    err = Open3.popen3(*command) do |_stdin, _stdout, stderr|
-      stderr.read
+    if track_progress?(options)
+      invoke_with_progress(command, options)
+    else
+      err = Open3.popen3(*command) do |_stdin, _stdout, stderr|
+        stderr.read
+      end
     end
     if options[:return_file]
       return_file = options.delete(:return_file)
@@ -287,10 +279,12 @@ class WickedPdf
                                   :dpi,
                                   :page_size,
                                   :page_width,
-                                  :title])
+                                  :title,
+                                  :log_level])
       r += make_options(options, [:lowquality,
                                   :grayscale,
-                                  :no_pdf_compression], '', :boolean)
+                                  :no_pdf_compression,
+                                  :quiet], '', :boolean)
       r += make_options(options, [:image_dpi,
                                   :image_quality,
                                   :page_height], '', :numeric)
